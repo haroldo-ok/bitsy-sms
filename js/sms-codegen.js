@@ -208,9 +208,10 @@ function generateBasCode(world) {
   // Inner loop: VPOKE #c, tile then #c=#c+2
   // After 16 cells: #c=#c+32 to skip to next name-table row
   L("draw_room:\tPROCEDURE");
+  L("	DISSCR");
   L("\tCLS");
-  // Unrolled VPOKEs with literal addresses (no expressions) - safest CVBasic approach
   L("\tGOSUB load_room_tiles");
+  L("\tENASCR");  
   L("\tGOSUB draw_player_sprite");
   if(numNpcs>0){
     npcIds.forEach(function(nid,i){
