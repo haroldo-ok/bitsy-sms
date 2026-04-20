@@ -1,0 +1,213 @@
+/* ═══════════════════════════════════════════════════════════
+   Bitsy SMS — stylesheet
+   Dark retro theme with SMS/Sega colour accents
+   ═══════════════════════════════════════════════════════════ */
+
+* { box-sizing: border-box; }
+
+body {
+  background: #1a1a2e;
+  color: #e0e0e0;
+  line-height: 150%;
+  font-family: "Courier New", monospace;
+  font-size: 13px;
+  margin: 0;
+  padding: 0;
+}
+
+/* ── top bar ───────────────────────────────────────────── */
+#topbar {
+  width: 100%;
+  background: #16213e;
+  color: #e94560;
+  font-size: 18px;
+  font-weight: bold;
+  padding: 8px 16px;
+  border-bottom: 2px solid #e94560;
+  letter-spacing: 2px;
+}
+#topbar span { color: #0f3460; }
+#topbar small {
+  font-size: 11px;
+  color: #888;
+  letter-spacing: 0;
+  margin-left: 16px;
+}
+
+/* ── canvases ──────────────────────────────────────────── */
+canvas {
+  background: black;
+  display: block;
+}
+
+/* ── panels ────────────────────────────────────────────── */
+.panel {
+  float: left;
+  background: #16213e;
+  margin: 8px;
+  padding: 10px;
+  border: 1px solid #0f3460;
+  border-radius: 4px;
+}
+.panel h3 {
+  color: #e94560;
+  margin: 0 0 8px 0;
+  font-size: 12px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  border-bottom: 1px solid #0f3460;
+  padding-bottom: 4px;
+}
+
+/* ── form elements ─────────────────────────────────────── */
+textarea {
+  font-family: monospace;
+  background: #0a0a1a;
+  color: #aaffaa;
+  border: 1px solid #0f3460;
+  padding: 4px;
+}
+
+button {
+  font-family: "Courier New", monospace;
+  font-size: 11px;
+  background: #0f3460;
+  color: #e0e0e0;
+  border: 1px solid #e94560;
+  padding: 4px 8px;
+  cursor: pointer;
+  margin: 2px 1px;
+  border-radius: 2px;
+}
+button:hover { background: #e94560; color: white; }
+
+button.primary {
+  background: #e94560;
+  color: white;
+  font-weight: bold;
+  padding: 6px 12px;
+  font-size: 12px;
+}
+button.primary:hover { background: #ff6b6b; }
+
+button.secondary {
+  background: #533483;
+  border-color: #533483;
+}
+
+input[type="text"] {
+  font-family: monospace;
+  background: #0a0a1a;
+  color: #e0e0e0;
+  border: 1px solid #0f3460;
+  padding: 2px 4px;
+}
+input[type="color"] {
+  background: #0a0a1a;
+  border: 1px solid #0f3460;
+  padding: 2px;
+  cursor: pointer;
+}
+input[type="radio"] { accent-color: #e94560; }
+
+label { color: #aaa; }
+
+/* ── about box ─────────────────────────────────────────── */
+#about {
+  background: #0f3460;
+  border: 1px solid #533483;
+  margin: 8px;
+  padding: 12px;
+  font-size: 12px;
+  color: #ccc;
+  border-radius: 4px;
+}
+#about a { color: #e94560; }
+#about code {
+  background: #0a0a1a;
+  padding: 1px 4px;
+  border-radius: 2px;
+  color: #aaffaa;
+}
+
+/* ── SMS export panel ──────────────────────────────────── */
+#sms-panel { clear: both; }
+
+.sms-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 8px;
+}
+
+.sms-step {
+  background: #0f3460;
+  border: 1px solid #533483;
+  border-radius: 4px;
+  padding: 8px;
+  flex: 1;
+  min-width: 200px;
+}
+.sms-step h4 {
+  color: #e94560;
+  margin: 0 0 6px 0;
+  font-size: 11px;
+  letter-spacing: 1px;
+}
+.sms-step p { font-size: 11px; color: #aaa; margin: 4px 0; }
+.sms-step a { color: #aaa; }
+
+.step-num {
+  display: inline-block;
+  background: #e94560;
+  color: white;
+  width: 18px;
+  height: 18px;
+  text-align: center;
+  border-radius: 50%;
+  font-weight: bold;
+  margin-right: 6px;
+  font-size: 10px;
+  line-height: 18px;
+}
+
+/* ── CVBasic source preview ────────────────────────────── */
+#bas-output {
+  font-family: monospace;
+  font-size: 10px;
+  background: #0a0a1a;
+  color: #ffffaa;
+  border: 1px solid #0f3460;
+  padding: 6px;
+  height: 220px;
+  overflow-y: auto;
+  width: 100%;
+  white-space: pre;
+  margin: 0;
+}
+
+/* ── build log ─────────────────────────────────────────── */
+#status-log {
+  width: 100%;
+  height: 120px;
+  background: #0a0a1a;
+  color: #aaffaa;
+  border: 1px solid #0f3460;
+  font-family: monospace;
+  font-size: 11px;
+  padding: 6px;
+  resize: vertical;
+}
+
+.log-section h4 {
+  color: #e94560;
+  font-size: 11px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  margin: 0 0 4px 0;
+}
+
+.limits-note { font-size: 10px; color: #888; margin-top: 4px; }
+
+iframe { display: none; }
