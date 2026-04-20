@@ -1,0 +1,11 @@
+{
+  "name": "bitsy-sms",
+  "version": "0.0.1",
+  "description": "Create Sega Master System ROMs using a Bitsy-inspired editor.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "",
+  "license": "MIT"
+}
