@@ -3,22 +3,11 @@
  * ─────────────────────────────────────────────────────────────────
  * Bitsy SMS — three-step compile pipeline
  *
- * How the iframes work (from compiler-invoker.js in CVBasic-emscripten):
- *
- *   1. Parent page exposes  window.compiler = { cvbasic, gasm80, status }
- *      BEFORE any iframe loads.
- *
- *   2. Each iframe HTML calls  top.compiler.<n>.handleIframeCallback(window)
- *      immediately on load, then loads the Emscripten JS asynchronously.
- *
- *   3. handleIframeCallback polls until iframeWindow.FS is ready, then
- *      resolves the pending Promise with the iframe's window object.
- *
- *   4. Caller writes input to iframeWindow.FS, calls
- *      iframeWindow.Module.callMain([...]), reads output from FS.
- *
- *   The iframe HTML files load cvbasic.js / gasm80.js by relative URL,
- *   so they MUST live in the same folder: compiler/
+ * Correct callMain arguments (from CVBasic-emscripten source):
+ *   CVBasic:  callMain(["--sms", "/input.bas", "/output.asm"])
+ *             ^^^ double-dash flag, flag BEFORE filenames
+ *   gasm80:   callMain(["/input.asm", "-o", "/output.bin", "-sms"])
+ *             ^^^ single-dash, flag AFTER filenames
  * ─────────────────────────────────────────────────────────────────
  */
 
@@ -38,9 +27,8 @@ function smsLogClear() {
 }
 
 /* ══════════════════════════════════════════════════════════
-   window.compiler — mirrors the object that compiler-invoker.js
-   creates, but defined inline here so we don't need that script.
-   Must be assigned before any iframe can possibly load.
+   window.compiler — must be assigned before any iframe loads.
+   Mirrors the object that compiler-invoker.js creates.
    ══════════════════════════════════════════════════════════ */
 
 function createToolInvoker(moduleName) {
@@ -48,7 +36,7 @@ function createToolInvoker(moduleName) {
     pendingCallback: null,
     pendingReject:   null,
 
-    // Called by the iframe: top.compiler.<name>.handleIframeCallback(window)
+    // Called by the iframe: top.compiler.<n>.handleIframeCallback(window)
     handleIframeCallback: function(iframeWindow) {
       var retries = 0;
       function poll() {
@@ -87,7 +75,7 @@ function createToolInvoker(moduleName) {
             invoker.pendingReject   = null;
             reject(new Error(
               moduleName + " timed out (30s).\n" +
-              "Serve this project via HTTP, e.g.:\n" +
+              "Serve this project via HTTP:\n" +
               "  python3 -m http.server\n" +
               "then open http://localhost:8000/"
             ));
@@ -99,8 +87,6 @@ function createToolInvoker(moduleName) {
   return invoker;
 }
 
-// Minimal status module; createToolConfiguration is called by the iframe
-// as:  var Module = top.compiler.status.createToolConfiguration('cvbasic', window)
 var compilerStatusModule = {
   print:    function(t) { smsLog("[out] " + t); },
   printErr: function(t) { smsLog("[err] " + t); },
@@ -121,7 +107,6 @@ var compilerStatusModule = {
   }
 };
 
-// Assign before any iframe can load
 window.compiler = {
   cvbasic: createToolInvoker("cvbasic"),
   gasm80:  createToolInvoker("gasm80"),
@@ -151,17 +136,20 @@ function onDownloadBas() {
 }
 
 /* ══════════════════════════════════════════════════════════
-   STEP 2 — Compile .bas → .asm via CVBasic (Emscripten)
+   STEP 2 — Compile .bas → .asm via CVBasic
+   CVBasic args: ["--sms", inputFile, outputFile]
+   (flag is --sms with double dash, and goes BEFORE filenames)
    ══════════════════════════════════════════════════════════ */
 function onCompileAsm() {
   if (!cachedBasSource) { smsLog("ERROR: Generate .bas first (Step 1)."); return; }
   smsLog("Loading CVBasic compiler iframe...");
   window.compiler.cvbasic.load()
     .then(function(iwin) {
-      smsLog("CVBasic ready — compiling for SMS (-sms flag)...");
+      smsLog("CVBasic ready — compiling for SMS...");
       try {
         iwin.FS.writeFile("/input.bas", cachedBasSource);
-        iwin.Module.callMain(["/input.bas", "-sms", "/output.asm"]);
+        // "--sms" with double dash, flag before filenames
+        iwin.Module.callMain(["--sms", "/input.bas", "/output.asm"]);
         var asm = iwin.FS.readFile("/output.asm", { encoding: "utf8" });
         cachedAsmSource = asm;
         smsLog("Compiled OK — " + asm.split("\n").length + " asm lines. Click 'Assemble → .sms ROM'.");
@@ -171,7 +159,9 @@ function onCompileAsm() {
 }
 
 /* ══════════════════════════════════════════════════════════
-   STEP 3 — Assemble .asm → .sms ROM
+   STEP 3 — Assemble .asm → .sms ROM via gasm80
+   gasm80 args: [inputFile, "-o", outputFile, "-sms"]
+   (single dash, flag goes AFTER filenames)
    ══════════════════════════════════════════════════════════ */
 function onAssembleRom() {
   if (!cachedAsmSource) { smsLog("ERROR: Compile .asm first (Step 2)."); return; }
@@ -181,7 +171,8 @@ function onAssembleRom() {
       smsLog("gasm80 ready — assembling...");
       try {
         iwin.FS.writeFile("/input.asm", cachedAsmSource);
-        iwin.Module.callMain(["/input.asm", "-o", "/output.bin"]);
+        // single dash -sms, flag after filenames
+        iwin.Module.callMain(["/input.asm", "-o", "/output.bin", "-sms"]);
         var bin = iwin.FS.readFile("/output.bin");
         smsLog("Assembled OK — " + bin.length + " raw bytes.");
         var rom = buildRom(bin);

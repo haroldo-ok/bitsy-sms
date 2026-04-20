@@ -3,32 +3,19 @@
  * ─────────────────────────────────────────────────────────────────
  * Bitsy SMS — CVBasic source code generator
  *
- * Depends on: bitsy-engine.js globals (title, palette, tile, sprite,
- *             set, dialog, imageStore)
+ * CVBasic SMS syntax rules (from studying the official examples):
  *
- * Entry point:   generateBasCode(world)  →  string (CVBasic source)
- *
- * Mapping summary:
- *   Bitsy concept          │ SMS / CVBasic implementation
- *   ──────────────────────┼──────────────────────────────────────
- *   3-color palette        │ VPOKE into SMS CRAM ($C000)
- *   8×8 tile (1-bit)       │ DEFINE CHAR + BITMAP rows
- *   16×16 room tilemap     │ VPOKE into SMS name table ($3800)
- *   Player (sprite "A")    │ DEFINE SPRITE 0 + SPRITE 0,y,x,0
- *   NPC sprites            │ DEFINE SPRITE 1..N + SPRITE nc,y,x,2
- *   Wall tiles             │ wall_flag() array, checked in move loop
- *   Room exits (EXT)       │ check_exits: PROCEDURE
- *   Dialog text            │ PRINT AT row,col,"text"
- *   Multiple rooms         │ room_table: DATA BYTE block + load_room:
+ *   BITMAP rows        16 chars wide, e.g. BITMAP "1.......1......."
+ *   SPRITE             SPRITE n,y,x,char   (commas, no spaces after n)
+ *   PALETTE            PALETTE index,value  (built-in, no VPOKE needed)
+ *   Controller         cont1.left / cont1.right / cont1.up / cont1.down / cont1.button
+ *   DATA BYTE          one statement per line, no backslash continuation
+ *   Comments           ' comment  (only at start of line or after full statement)
+ *   No inline ')       Do not mix comment tokens inside expressions
  * ─────────────────────────────────────────────────────────────────
  */
 
 /* ── SMS palette conversion ───────────────────────────── */
-
-/**
- * Convert 8-bit RGB to a single SMS palette byte.
- * SMS uses 2 bits per channel: B[5:4] G[3:2] R[1:0]
- */
 function rgbToSms(r, g, b) {
   var sr = Math.min(3, Math.round(r / 85));
   var sg = Math.min(3, Math.round(g / 85));
@@ -36,27 +23,15 @@ function rgbToSms(r, g, b) {
   return (sr & 3) | ((sg & 3) << 2) | ((sb & 3) << 4);
 }
 
-/* ── pixel data helpers ───────────────────────────────── */
-
-/**
- * Convert one row of a Bitsy 8-pixel bitmap string to the
- * 16-character CVBasic BITMAP notation ("1" = set, "." = clear).
- * The right 8 pixels are always blank (we only use 8-wide tiles
- * but CVBasic BITMAP rows are 16 pixels wide).
- */
+/* ── pixel row → 16-char BITMAP string ───────────────── */
 function rowToBitmapStr(rowStr) {
   var out = "";
-  for (var x = 0; x < 8; x++) out += (rowStr[x] === "1") ? "1" : ".";
-  out += "........"; // right half — always blank for 8px tiles
+  for (var x = 0; x < 8; x++) out += (rowStr && rowStr[x] === "1") ? "1" : ".";
+  out += "........";   // right half always blank (tiles are 8px wide)
   return out;
 }
 
 /* ── dialog sanitiser ─────────────────────────────────── */
-
-/**
- * Strip non-ASCII characters and truncate to fit in one
- * SMS text row (max 32 chars, but we allow 38 with the offset).
- */
 function sanitizeDialog(txt) {
   return (txt || "...")
     .replace(/[^A-Za-z0-9 .,!?'":;()\-]/g, "?")
@@ -64,133 +39,103 @@ function sanitizeDialog(txt) {
 }
 
 /* ══════════════════════════════════════════════════════════
-   MAIN CODE GENERATOR
+   MAIN GENERATOR
    ══════════════════════════════════════════════════════════ */
-
-/**
- * @param {object} world  - snapshot of the Bitsy engine globals
- *   { title, palette, tile, sprite, set, dialog, imageStore }
- * @returns {string}  complete CVBasic .bas source
- */
 function generateBasCode(world) {
 
-  /* ── palette ────────────────────────────────────────── */
   var pal       = world.palette["0"] || [[0,0,0],[200,200,200],[255,255,255]];
   var colBg     = rgbToSms(pal[0][0], pal[0][1], pal[0][2]);
   var colTile   = rgbToSms(pal[1][0], pal[1][1], pal[1][2]);
   var colSprite = rgbToSms(pal[2][0], pal[2][1], pal[2][2]);
 
-  /* ── tile index map ─────────────────────────────────── */
-  // Bitsy tile IDs → SMS char indices 1..N  (0 = blank)
   var tileIds    = Object.keys(world.tile).sort();
   var tileCharMap = {};
   tileIds.forEach(function(id, idx) { tileCharMap[id] = idx + 1; });
   var numTiles   = tileIds.length;
 
-  /* ── NPC list (all sprites except "A") ─────────────── */
-  var npcIds = Object.keys(world.sprite)
-    .filter(function(id) { return id !== "A"; })
-    .sort();
+  var npcIds  = Object.keys(world.sprite).filter(function(id) { return id !== "A"; }).sort();
   var numNpcs = npcIds.length;
 
-  /* ── room list ──────────────────────────────────────── */
   var roomIds  = Object.keys(world.set).sort();
   var numRooms = roomIds.length;
 
-  /* ── player starting position ───────────────────────── */
   var playerSprite  = world.sprite["A"];
   var playerRoom    = (playerSprite && playerSprite.set) ? playerSprite.set : "0";
-  var playerX       = (playerSprite) ? (playerSprite.x || 4) : 4;
-  var playerY       = (playerSprite) ? (playerSprite.y || 4) : 4;
+  var playerX       = playerSprite ? (playerSprite.x || 4) : 4;
+  var playerY       = playerSprite ? (playerSprite.y || 4) : 4;
   var playerRoomIdx = roomIds.indexOf(playerRoom);
   if (playerRoomIdx < 0) playerRoomIdx = 0;
 
-  /* ══════════════════════════════════════════════════════
-     BUILD OUTPUT LINE-BY-LINE
-     ══════════════════════════════════════════════════════ */
   var bas = [];
-  var L   = function(s) { bas.push(s === undefined ? "" : s); };
+  function L(s) { bas.push(s === undefined ? "" : s); }
 
-  /* ── file header ────────────────────────────────────── */
-  L("\t'");
+  /* ── header ──────────────────────────────────────────── */
   L("\t' " + (world.title || "Bitsy SMS Game"));
-  L("\t' Generated by Bitsy SMS (https://github.com/haroldo-ok/CVBasic-emscripten)");
-  L("\t' Target: Sega Master System, MODE 4");
-  L("\t'");
+  L("\t' Generated by Bitsy SMS");
   L();
 
-  /* ── constants ──────────────────────────────────────── */
-  L("\t' ── constants ──────────────────────────────────────");
-  L("\tCONST ROOM_W    = 16");
-  L("\tCONST ROOM_H    = 16");
-  L("\tCONST SCREEN_OX = 48\t' left pixel offset (centres 128px in 256px)");
-  L("\tCONST SCREEN_OY = 24\t' top  pixel offset (centres 128px in 192px)");
-  L("\tCONST NUM_TILES = " + numTiles);
-  L("\tCONST NUM_ROOMS = " + numRooms);
-  L("\tCONST NUM_NPCS  = " + Math.max(numNpcs, 1));
+  /* ── constants ───────────────────────────────────────── */
+  L("\tCONST ROOM_W = 16");
+  L("\tCONST ROOM_H = 16");
+  L("\tCONST SCREEN_OX = 48");
+  L("\tCONST SCREEN_OY = 24");
   L();
 
-  /* ── variable declarations ──────────────────────────── */
-  L("\t' ── variables ──────────────────────────────────────");
-  L("\tDIM room_data(256)\t' tile indices for current room (16×16)");
-  L("\tDIM wall_flag(32)\t' wall_flag(i)=1 if tile index i is a wall");
-  L("\tDIM npc_x("    + Math.max(numNpcs, 1) + ")");
-  L("\tDIM npc_y("    + Math.max(numNpcs, 1) + ")");
-  L("\tDIM npc_room(" + Math.max(numNpcs, 1) + ")");
-  L("\tDIM npc_dlg("  + Math.max(numNpcs, 1) + ")\t' dialog index (1-based; 0 = none)");
+  /* ── variable declarations ───────────────────────────── */
+  L("\tDIM room_data(256)");
+  L("\tDIM wall_flag(32)");
+  if (numNpcs > 0) {
+    L("\tDIM npc_x(" + numNpcs + ")");
+    L("\tDIM npc_y(" + numNpcs + ")");
+    L("\tDIM npc_room(" + numNpcs + ")");
+    L("\tDIM npc_dlg(" + numNpcs + ")");
+  }
   L();
 
-  /* ── hardware init ──────────────────────────────────── */
-  L("\t' ── hardware init ──────────────────────────────────");
+  /* ── hardware init ───────────────────────────────────── */
   L("\tMODE 4");
   L();
-  L("\t' SMS CRAM palette");
-  L("\t' Background palette (indices 0-15 at $C000)");
-  L("\tVPOKE $C000, " + colBg    + "\t' colour 0  = background");
-  L("\tVPOKE $C001, " + colTile  + "\t' colour 1  = tiles");
-  L("\tVPOKE $C002, " + colBg    + "\t' colour 2  = unused bg");
-  L("\t' Sprite palette (indices 16-31 at $C010)");
-  L("\tVPOKE $C010, " + colSprite + "\t' colour 16 = player/NPC");
-  L("\tVPOKE $C011, " + colBg    + "\t' colour 17 = sprite bg (transparent-ish)");
+  // Use PALETTE command (cleaner than VPOKE; index 0-15 = bg palette, 16-31 = sprite palette)
+  L("\tPALETTE 0," + colBg);
+  L("\tPALETTE 1," + colTile);
+  L("\tPALETTE 16," + colSprite);
+  L("\tPALETTE 17," + colBg);
   L();
 
-  /* ── tile / sprite DEFINE ───────────────────────────── */
-  L("\t' ── DEFINE characters & sprites ────────────────────");
-  L("\tDEFINE CHAR 0, 1, blank_tile\t' char 0 = empty cell");
+  /* ── DEFINE characters ───────────────────────────────── */
+  L("\tDEFINE CHAR 0,1,blank_tile");
   if (numTiles > 0) {
-    L("\tDEFINE CHAR 1, " + numTiles + ", tile_bitmaps");
+    L("\tDEFINE CHAR 1," + numTiles + ",tile_bitmaps");
   }
-  L("\tDEFINE SPRITE 0, 1, player_bitmap");
+  L("\tDEFINE SPRITE 0,1,player_bitmap");
   if (numNpcs > 0) {
-    L("\tDEFINE SPRITE 1, " + numNpcs + ", npc_bitmaps");
+    L("\tDEFINE SPRITE 1," + numNpcs + ",npc_bitmaps");
   }
   L();
 
-  /* ── game state init ────────────────────────────────── */
-  L("\t' ── game state ─────────────────────────────────────");
-  L("\tpx           = " + playerX);
-  L("\tpy           = " + playerY);
-  L("\tcur_room     = " + playerRoomIdx);
+  /* ── game state ──────────────────────────────────────── */
+  L("\tpx = " + playerX);
+  L("\tpy = " + playerY);
+  L("\tcur_room = " + playerRoomIdx);
   L("\tdialog_active = 0");
-  L("\tdialog_idx    = 0");
+  L("\tdialog_idx = 0");
   L();
 
-  /* ── NPC init ───────────────────────────────────────── */
+  /* ── NPC positions ───────────────────────────────────── */
   if (numNpcs > 0) {
-    L("\t' ── NPC positions ───────────────────────────────────");
     npcIds.forEach(function(nid, i) {
       var s  = world.sprite[nid];
       var nr = roomIds.indexOf(s.set || "0");
       if (nr < 0) nr = 0;
-      L("\tnpc_x("    + i + ")    = " + (s.x  || 0));
-      L("\tnpc_y("    + i + ")    = " + (s.y  || 0));
+      L("\tnpc_x(" + i + ") = " + (s.x || 0));
+      L("\tnpc_y(" + i + ") = " + (s.y || 0));
       L("\tnpc_room(" + i + ") = " + nr);
-      L("\tnpc_dlg("  + i + ")  = " + (i + 1) + "\t' → dlg_text_" + i);
+      L("\tnpc_dlg(" + i + ") = " + (i + 1));
     });
     L();
   }
 
-  /* ── startup ────────────────────────────────────────── */
+  /* ── startup ─────────────────────────────────────────── */
   L("\tGOSUB load_room");
   L("\tGOSUB draw_room");
   L();
@@ -198,51 +143,47 @@ function generateBasCode(world) {
   /* ══════════════════════════════════════════════════════
      MAIN LOOP
      ══════════════════════════════════════════════════════ */
-  L("\t' ── main loop ──────────────────────────────────────");
   L("main_loop:");
-  L("\tWAIT\t' sync to VBlank (60Hz)");
+  L("\tWAIT");
   L();
 
-  // Dialog dismiss
+  // Dialog dismiss — any button clears it
   L("\tIF dialog_active THEN");
-  L("\t\t#b = CONT.BUTTON OR CONT.LEFT OR CONT.RIGHT OR CONT.UP OR CONT.DOWN");
-  L("\t\tIF #b THEN");
+  L("\t\tIF cont1.button THEN");
   L("\t\t\tdialog_active = 0");
-  L("\t\t\tGOSUB draw_room\t' redraw to clear dialog box");
+  L("\t\t\tGOSUB draw_room");
   L("\t\tEND IF");
   L("\t\tGOTO main_loop");
   L("\tEND IF");
   L();
 
   // Read D-pad
-  L("\t' read D-pad — one step per frame");
   L("\tnx = px");
   L("\tny = py");
-  L("\tIF CONT.LEFT  THEN nx = px - 1");
-  L("\tIF CONT.RIGHT THEN nx = px + 1");
-  L("\tIF CONT.UP    THEN ny = py - 1");
-  L("\tIF CONT.DOWN  THEN ny = py + 1");
+  L("\tIF cont1.left THEN nx = px - 1");
+  L("\tIF cont1.right THEN nx = px + 1");
+  L("\tIF cont1.up THEN ny = py - 1");
+  L("\tIF cont1.down THEN ny = py + 1");
   L("\tIF nx = px AND ny = py THEN GOTO main_loop");
   L();
 
-  // Bounds check
-  L("\t' bounds");
+  // Bounds
   L("\tIF nx < 0 OR nx >= ROOM_W THEN GOTO main_loop");
   L("\tIF ny < 0 OR ny >= ROOM_H THEN GOTO main_loop");
   L();
 
   // Wall check
-  L("\t' wall check");
   L("\ttile_at = room_data(ny * ROOM_W + nx)");
-  L("\tIF tile_at > 0 AND wall_flag(tile_at) THEN GOTO main_loop");
+  L("\tIF tile_at > 0 THEN");
+  L("\t\tIF wall_flag(tile_at) THEN GOTO main_loop");
+  L("\tEND IF");
   L();
 
   // NPC collision
   if (numNpcs > 0) {
-    L("\t' NPC collision');");
-    L("\tFOR nc = 0 TO NUM_NPCS - 1");
+    L("\tFOR nc = 0 TO " + (numNpcs - 1));
     L("\t\tIF npc_room(nc) = cur_room AND npc_x(nc) = nx AND npc_y(nc) = ny THEN");
-    L("\t\t\tdialog_idx    = npc_dlg(nc)");
+    L("\t\t\tdialog_idx = npc_dlg(nc)");
     L("\t\t\tdialog_active = 1");
     L("\t\t\tGOSUB show_dialog");
     L("\t\t\tGOTO main_loop");
@@ -252,13 +193,11 @@ function generateBasCode(world) {
   }
 
   // Exit check
-  L("\t' exit check");
   L("\tGOSUB check_exits");
   L("\tIF exit_taken THEN GOTO main_loop");
   L();
 
-  // Move
-  L("\t' commit movement");
+  // Commit movement + redraw sprite
   L("\tpx = nx");
   L("\tpy = ny");
   L("\tGOSUB draw_player_sprite");
@@ -266,12 +205,7 @@ function generateBasCode(world) {
   L("\tGOTO main_loop");
   L();
 
-  /* ══════════════════════════════════════════════════════
-     SUBROUTINES
-     ══════════════════════════════════════════════════════ */
-
-  /* check_exits */
-  L("\t' ── check_exits ─────────────────────────────────────");
+  /* ── check_exits ─────────────────────────────────────── */
   L("check_exits:\tPROCEDURE");
   L("\texit_taken = 0");
   var hasExit = false;
@@ -281,180 +215,160 @@ function generateBasCode(world) {
       var destIdx = roomIds.indexOf(ext.dest.set);
       if (destIdx < 0) destIdx = 0;
       L("\tIF cur_room = " + ridx + " AND nx = " + ext.x + " AND ny = " + ext.y + " THEN");
-      L("\t\tcur_room   = " + destIdx);
-      L("\t\tpx         = " + ext.dest.x);
-      L("\t\tpy         = " + ext.dest.y);
+      L("\t\tcur_room = " + destIdx);
+      L("\t\tpx = " + ext.dest.x);
+      L("\t\tpy = " + ext.dest.y);
       L("\t\tGOSUB load_room");
       L("\t\tGOSUB draw_room");
       L("\t\texit_taken = 1");
       L("\tEND IF");
     });
   });
-  if (!hasExit) L("\t' (no exits defined in this game)");
+  if (!hasExit) L("\t' no exits");
   L("\tEND");
   L();
 
-  /* load_room */
-  L("\t' ── load_room ───────────────────────────────────────");
-  L("\t' Reads 256 tile bytes + 16 wall-flag bytes from room_table");
-  L("\t' for the room at index cur_room.");
+  /* ── load_room ───────────────────────────────────────── */
+  // CVBasic has no backslash continuation and no SEEK for DATA.
+  // We use a GOSUB-dispatch table instead: one label per room.
   L("load_room:\tPROCEDURE");
   L("\tFOR wi = 0 TO 31");
   L("\t\twall_flag(wi) = 0");
   L("\tNEXT wi");
-  L("\tRESTORE room_table");
-  L("\t' skip rooms before cur_room (272 bytes each: 256 tiles + 16 wall bytes)');");
-  L("\tFOR skip = 0 TO cur_room - 1");
-  L("\t\tFOR rd = 0 TO 271");
-  L("\t\t\tREAD BYTE dummy");
-  L("\t\tNEXT rd");
-  L("\tNEXT skip");
-  L("\t' read tile data');");
-  L("\tFOR rd = 0 TO 255");
-  L("\t\tREAD BYTE room_data(rd)");
-  L("\tNEXT rd");
-  L("\t' read wall flags');");
-  L("\tFOR wd = 0 TO 15");
-  L("\t\tREAD BYTE wf");
-  L("\t\tIF wf > 0 THEN wall_flag(wf) = 1");
-  L("\tNEXT wd");
+  roomIds.forEach(function(rid, ridx) {
+    if (ridx === 0) {
+      L("\tIF cur_room = 0 THEN GOSUB load_room_0");
+    } else {
+      L("\tIF cur_room = " + ridx + " THEN GOSUB load_room_" + ridx);
+    }
+  });
   L("\tEND");
   L();
 
-  /* draw_room */
-  L("\t' ── draw_room ───────────────────────────────────────");
-  L("\t' Writes room tile indices into the SMS name table,");
-  L("\t' then re-draws all sprites for the current room.');");
+  /* ── draw_room ───────────────────────────────────────── */
   L("draw_room:\tPROCEDURE");
   L("\tCLS");
   L("\tFOR ry = 0 TO ROOM_H - 1");
   L("\t\tFOR rx = 0 TO ROOM_W - 1");
   L("\t\t\ttc = room_data(ry * ROOM_W + rx)");
-  L("\t\t\t' SMS name-table base = $3800; each entry = 2 bytes');");
   L("\t\t\t#addr = (SCREEN_OY / 8 + ry) * 32 + (SCREEN_OX / 8 + rx)");
-  L("\t\t\tVPOKE $3800 + #addr * 2,     tc\t' tile index");
-  L("\t\t\tVPOKE $3800 + #addr * 2 + 1, 0\t' palette 0, no flip, priority 0");
+  L("\t\t\tVPOKE $3800 + #addr * 2,tc");
+  L("\t\t\tVPOKE $3801 + #addr * 2,0");
   L("\t\tNEXT rx");
   L("\tNEXT ry");
   L("\tGOSUB draw_player_sprite");
   if (numNpcs > 0) {
-    L("\t' NPC sprites');");
-    L("\tFOR nc = 0 TO NUM_NPCS - 1");
+    L("\tFOR nc = 0 TO " + (numNpcs - 1));
     L("\t\tIF npc_room(nc) = cur_room THEN");
     L("\t\t\t#sx = SCREEN_OX + npc_x(nc) * 8");
     L("\t\t\t#sy = SCREEN_OY + npc_y(nc) * 8");
-    L("\t\t\tSPRITE nc + 1, #sy, #sx, 2\t' char index 2 = first NPC sprite");
+    // SPRITE n,y,x,char — no spaces after commas
+    L("\t\t\tSPRITE nc + 1,#sy,#sx,2");
     L("\t\tELSE");
-    L("\t\t\tSPRITE nc + 1, $D0, 0, 0\t' park off-screen");
+    L("\t\t\tSPRITE nc + 1,208,0,0");
     L("\t\tEND IF");
     L("\tNEXT nc");
   }
   L("\tEND");
   L();
 
-  /* draw_player_sprite */
-  L("\t' ── draw_player_sprite ──────────────────────────────");
+  /* ── draw_player_sprite ──────────────────────────────── */
   L("draw_player_sprite:\tPROCEDURE");
   L("\t#sx = SCREEN_OX + px * 8");
   L("\t#sy = SCREEN_OY + py * 8");
-  L("\tSPRITE 0, #sy, #sx, 0\t' SAT entry 0, char 0 = player");
+  L("\tSPRITE 0,#sy,#sx,0");
   L("\tEND");
   L();
 
-  /* show_dialog */
-  L("\t' ── show_dialog ─────────────────────────────────────");
-  L("\t' Draws a 2-row dialog box at the bottom of the screen");
-  L("\t' and prints the text for dialog_idx.');");
+  /* ── show_dialog ─────────────────────────────────────── */
   L("show_dialog:\tPROCEDURE");
-  L("\t' fill rows 20-21 of name table with a solid tile');");
   L("\tFOR dc = 0 TO 31");
-  L("\t\tVPOKE $3800 + (20 * 32 + dc) * 2, 1\t' solid bg tile");
-  L("\t\tVPOKE $3800 + (21 * 32 + dc) * 2, 1");
+  L("\t\tVPOKE $3800 + (20 * 32 + dc) * 2,1");
+  L("\t\tVPOKE $3800 + (21 * 32 + dc) * 2,1");
   L("\tNEXT dc");
   if (numNpcs > 0) {
-    L("\tIF dialog_idx = 0 THEN GOTO end_show_dialog");
     npcIds.forEach(function(nid, i) {
       var dlgTxt = sanitizeDialog(world.dialog[nid] || "...");
       L("\tIF dialog_idx = " + (i + 1) + " THEN PRINT AT 641,\"" + dlgTxt + "\"");
     });
-    L("end_show_dialog:");
   }
   L("\tEND");
   L();
 
   /* ══════════════════════════════════════════════════════
-     DATA TABLES
+     PER-ROOM LOAD SUBROUTINES
+     Each one uses READ BYTE from its own label.
+     DATA BYTE — one line per statement, 8 values per line max.
      ══════════════════════════════════════════════════════ */
-  L("\t' ── room_table ──────────────────────────────────────");
-  L("\t' Layout per room: 256 tile-index bytes (16 rows × 16 cols)");
-  L("\t'                + 16 wall-flag bytes (tile index 0-15, non-zero = wall)");
-  L("room_table:");
-  roomIds.forEach(function(rid) {
+  roomIds.forEach(function(rid, ridx) {
     var s       = world.set[rid];
     var wallIds = s.walls || [];
 
-    L("\t' ── room " + rid + " ──");
-    // 256 tile bytes — 16 rows of 16
-    var rows = [];
+    L("load_room_" + ridx + ":\tPROCEDURE");
+    L("\tRESTORE room_" + ridx + "_data");
+    L("\tFOR rd = 0 TO 255");
+    L("\t\tREAD BYTE room_data(rd)");
+    L("\tNEXT rd");
+    // wall flags
+    for (var wi = 0; wi < tileIds.length; wi++) {
+      var tid = tileIds[wi];
+      if (wallIds.indexOf(tid) >= 0) {
+        L("\twall_flag(" + (wi + 1) + ") = 1");
+      }
+    }
+    L("\tEND");
+    L();
+
+    // Room data as DATA BYTE, 8 values per line
+    L("room_" + ridx + "_data:");
+    var allTiles = [];
     for (var y = 0; y < 16; y++) {
       var rowStr = s.tilemap[y] || "0000000000000000";
-      var cols   = [];
       for (var x = 0; x < 16; x++) {
         var ch  = rowStr[x] || "0";
         var idx = (ch === "0") ? 0 : (tileCharMap[ch] !== undefined ? tileCharMap[ch] : 0);
-        cols.push(String(idx));
-      }
-      rows.push("\t\t" + cols.join(","));
-    }
-    // 16 wall-flag bytes
-    var wallBytes = [];
-    for (var wi = 0; wi <= 15; wi++) {
-      if (wi === 0) {
-        wallBytes.push("0");
-      } else {
-        var tid = tileIds[wi - 1];
-        wallBytes.push((tid && wallIds.indexOf(tid) >= 0) ? String(wi) : "0");
+        allTiles.push(idx);
       }
     }
-    L("\tDATA BYTE \\");
-    rows.forEach(function(row, i) {
-      L(row + (i < 15 ? "," : ",") + " \\");
-    });
-    L("\t\t" + wallBytes.join(","));
+    // Emit 8 values per DATA BYTE line
+    for (var di = 0; di < allTiles.length; di += 8) {
+      var chunk = allTiles.slice(di, di + 8);
+      L("\tDATA BYTE " + chunk.join(","));
+    }
     L();
   });
 
-  /* ── blank tile ─────────────────────────────────────── */
-  L("\t' ── blank_tile ──────────────────────────────────────");
+  /* ══════════════════════════════════════════════════════
+     BITMAP DATA
+     ══════════════════════════════════════════════════════ */
+
+  // blank tile
   L("blank_tile:");
-  for (var y = 0; y < 8; y++) L('\tBITMAP "................"');
+  for (var y = 0; y < 8; y++) L("\tBITMAP \"................\"");
   L();
 
-  /* ── tile bitmaps ───────────────────────────────────── */
-  L("\t' ── tile_bitmaps ────────────────────────────────────");
-  L("tile_bitmaps:");
-  tileIds.forEach(function(id) {
-    var src = world.imageStore.source["TIL_" + id] || [];
-    L("\t' tile '" + id + "'");
-    for (var y = 0; y < 8; y++) L('\tBITMAP "' + rowToBitmapStr(src[y] || "00000000") + '"');
-  });
-  L();
+  // tile bitmaps
+  if (numTiles > 0) {
+    L("tile_bitmaps:");
+    tileIds.forEach(function(id) {
+      var src = world.imageStore.source["TIL_" + id] || [];
+      for (var y = 0; y < 8; y++) L("\tBITMAP \"" + rowToBitmapStr(src[y]) + "\"");
+    });
+    L();
+  }
 
-  /* ── player bitmap ──────────────────────────────────── */
-  L("\t' ── player_bitmap ───────────────────────────────────");
+  // player bitmap
   L("player_bitmap:");
   var pSrc = world.imageStore.source["SPR_A"] || [];
-  for (var y = 0; y < 8; y++) L('\tBITMAP "' + rowToBitmapStr(pSrc[y] || "00000000") + '"');
+  for (var y = 0; y < 8; y++) L("\tBITMAP \"" + rowToBitmapStr(pSrc[y]) + "\"");
   L();
 
-  /* ── NPC bitmaps ────────────────────────────────────── */
+  // NPC bitmaps
   if (numNpcs > 0) {
-    L("\t' ── npc_bitmaps ──────────────────────────────────────");
     L("npc_bitmaps:");
     npcIds.forEach(function(nid) {
       var src = world.imageStore.source["SPR_" + nid] || [];
-      L("\t' NPC '" + nid + "'");
-      for (var y = 0; y < 8; y++) L('\tBITMAP "' + rowToBitmapStr(src[y] || "00000000") + '"');
+      for (var y = 0; y < 8; y++) L("\tBITMAP \"" + rowToBitmapStr(src[y]) + "\"");
     });
     L();
   }
