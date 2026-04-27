@@ -75,7 +75,7 @@
 #define SCREEN_TILE_H  24
 /* Centre 16x16 map on 32x24 BG plane */
 #define MAP_ORIGIN_X    8
-#define MAP_ORIGIN_Y    4
+#define MAP_ORIGIN_Y    2
 
 /* Dialog box */
 #define DBOX_X   1
@@ -611,7 +611,6 @@ static void dlg_advance(void) {
                     (unsigned int)(itm_vdp_for(it->id)));
             }
         }
-        dlg_clear_box();
     } else {
         dlg_page++;
         dlg_show_page();
@@ -636,7 +635,6 @@ static void draw_room(void) {
         put_bg_tile(MAP_ORIGIN_X + it->x, MAP_ORIGIN_Y + it->y,
             (unsigned int)(itm_vdp_for(it->id)));
     }
-    dlg_clear_box();
 }
 
 static void draw_sprites(void) {
@@ -808,8 +806,9 @@ static void input_tick(void) {
         else { dirs = held; joy_repeat = JOY_REPEAT_CONT; }
     }
 
-    if (pressed & (PORT_A_KEY_1|PORT_A_KEY_2)) {
-        if (dlg_active) dlg_advance();
+    if (pressed && dlg_active) {
+        /* Any button press advances/dismisses dialog (matches Bitsy web behavior) */
+        dlg_advance();
     }
 
     if (!dlg_active && !game_over && dirs) {
