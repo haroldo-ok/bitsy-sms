@@ -1,0 +1,35 @@
+name: branch
+
+on: pull_request
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      # setup
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+
+      # build resources
+      - run: node ./dev/icon_generator/makeicons
+      - run: node ./dev/resource_packager
+
+      # build docs
+      - run: npm ci
+        working-directory: docs
+      - run: npm run build
+        working-directory: docs
+
+      # upload
+      - name: sanitize branch name
+        id: name
+        run: echo ::set-output name=ARTIFACT_NAME::$(echo ${{ github.head_ref }} | tr "/" "_")
+      - uses: actions/upload-artifact@v4
+        with:
+          path: editor
+          retention-days: 7
+          name: ${{ steps.name.outputs.ARTIFACT_NAME }}
