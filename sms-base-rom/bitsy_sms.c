@@ -937,7 +937,7 @@ void main(void) {
     SMS_displayOff();
     SMS_disableLineInterrupt();
     SMS_VRAMmemsetW(0, 0, 16 * 1024);
-    SMS_useFirstHalfTilesforSprites(0);
+    SMS_useFirstHalfTilesforSprites(1);
     SMS_setSpriteMode(SPRITEMODE_NORMAL);
     /* Push all sprites off-screen after VRAM clear */
     SMS_initSprites();
