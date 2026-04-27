@@ -1,0 +1,42 @@
+name: release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      # setup
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+      - run: npm ci
+
+      # build resources
+      - run: node ./dev/icon_generator/makeicons
+      - run: node ./dev/resource_packager
+
+      # build docs
+      - run: npm ci
+        working-directory: docs
+      - run: npm run build
+        working-directory: docs
+
+      # publish
+      - name: get version
+        id: version
+        uses: martinbeentjes/npm-get-version-action@v1.3.1
+      # - name: publish to itch.io
+      #   uses: josephbmanley/butler-publish-itchio-action@v1.1.0
+      #   env:
+      #     BUTLER_CREDENTIALS: ${{ secrets.BUTLER_CREDENTIALS }}
+      #     CHANNEL: win-linux-mac-stable
+      #     ITCH_GAME: bitsy
+      #     ITCH_USER: ledoux
+      #     PACKAGE: editor
+      #     VERSION: ${{ steps.version.outputs.current-version }}
+      - name: publish to bitsy.org
+        run: node dev/publish editor editor ${{ secrets.FTP_USER }} ${{ secrets.FTP_SERVER }} 22 ${{ secrets.FTP_PASS }}

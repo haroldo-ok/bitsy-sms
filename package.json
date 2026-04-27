@@ -1,11 +1,9 @@
 {
-  "name": "bitsy-sms",
-  "version": "0.0.1",
-  "description": "Create Sega Master System ROMs using a Bitsy-inspired editor.",
-  "main": "index.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
-  "author": "",
-  "license": "MIT"
+	"name": "bitsy",
+	"version": "8.14.0",
+	"description": "make tiny games, worlds, and stories",
+	"author": "Adam Le Doux",
+	"devDependencies": {
+		"ssh2": "^1.11.0"
+	}
 }
