@@ -210,7 +210,7 @@ static void put_char(unsigned char tx, unsigned char ty, char ch) {
     unsigned int tile;
     if ((unsigned char)ch < 0x20 || (unsigned char)ch > 0x7E) ch = ' ';
     tile = VDPTILE_FONT + ((unsigned char)ch - 0x20);
-    put_bg_tile(tx, ty, (unsigned int)(tile << 2));
+    put_bg_tile(tx, ty, (unsigned int)(tile));
 }
 
 static void put_str(unsigned char tx, unsigned char ty, const char *s) {
@@ -544,14 +544,14 @@ static void dlg_draw_box(void) {
     unsigned char x, y;
     for (y = DBOX_Y; y < DBOX_Y + DBOX_H; y++)
         for (x = DBOX_X; x < DBOX_X + DBOX_W; x++)
-            put_bg_tile(x, y, (unsigned int)(VDPTILE_SOLID << 2));
+            put_bg_tile(x, y, (unsigned int)(VDPTILE_SOLID));
 }
 
 static void dlg_clear_box(void) {
     unsigned char x, y;
     for (y = DBOX_Y; y < DBOX_Y + DBOX_H; y++)
         for (x = DBOX_X; x < DBOX_X + DBOX_W; x++)
-            put_bg_tile(x, y, (unsigned int)(VDPTILE_BLANK << 2));
+            put_bg_tile(x, y, (unsigned int)(VDPTILE_BLANK));
 }
 
 static void dlg_show_page(void) {
@@ -603,12 +603,12 @@ static void dlg_advance(void) {
                 for (x = 0; x < MAP_W; x++) {
                     unsigned char tid = cur_room.tilemap[y][x];
                     put_bg_tile(MAP_ORIGIN_X + x, MAP_ORIGIN_Y + y,
-                        (unsigned int)((tid ? tile_vdp_for(tid) : VDPTILE_BLANK) << 2));
+                        (unsigned int)(tid ? tile_vdp_for(tid) : VDPTILE_BLANK));
                 }
             for (i = 0; i < cur_room.item_count; i++) {
                 RoomItem *it = &cur_room.items[i];
                 put_bg_tile(MAP_ORIGIN_X + it->x, MAP_ORIGIN_Y + it->y,
-                    (unsigned int)(itm_vdp_for(it->id) << 2));
+                    (unsigned int)(itm_vdp_for(it->id)));
             }
         }
         dlg_clear_box();
@@ -629,12 +629,12 @@ static void draw_room(void) {
         for (x = 0; x < MAP_W; x++) {
             unsigned char tid = cur_room.tilemap[y][x];
             put_bg_tile(MAP_ORIGIN_X + x, MAP_ORIGIN_Y + y,
-                (unsigned int)((tid ? tile_vdp_for(tid) : VDPTILE_BLANK) << 2));
+                (unsigned int)(tid ? tile_vdp_for(tid) : VDPTILE_BLANK));
         }
     for (i = 0; i < cur_room.item_count; i++) {
         RoomItem *it = &cur_room.items[i];
         put_bg_tile(MAP_ORIGIN_X + it->x, MAP_ORIGIN_Y + it->y,
-            (unsigned int)(itm_vdp_for(it->id) << 2));
+            (unsigned int)(itm_vdp_for(it->id)));
     }
     dlg_clear_box();
 }
@@ -751,7 +751,7 @@ static void try_move(signed char dx, signed char dy) {
             cur_room.items[i] = cur_room.items[cur_room.item_count];
             /* Clear tile */
             put_bg_tile(MAP_ORIGIN_X + player_x, MAP_ORIGIN_Y + player_y,
-                (unsigned int)(VDPTILE_BLANK << 2));
+                (unsigned int)(VDPTILE_BLANK));
             /* Item dialog: item id == dialog id */
             dlg_start(iid);
             return;
@@ -845,7 +845,7 @@ static void show_title(void) {
 
     for (ty = 0; ty < SCREEN_TILE_H; ty++)
         for (tx = 0; tx < SCREEN_TILE_W; tx++)
-            put_bg_tile(tx, ty, (unsigned int)(VDPTILE_BLANK << 2));
+            put_bg_tile(tx, ty, (unsigned int)(VDPTILE_BLANK));
 
     if (p) {
         while ((ch = (char)*p++) != '\0') {
@@ -939,6 +939,10 @@ void main(void) {
     SMS_VRAMmemsetW(0, 0, 16 * 1024);
     SMS_useFirstHalfTilesforSprites(0);
     SMS_setSpriteMode(SPRITEMODE_NORMAL);
+    /* Push all sprites off-screen after VRAM clear */
+    SMS_initSprites();
+    SMS_finalizeSprites();
+    SMS_copySpritestoSAT();
 
     res_init();
 
@@ -953,6 +957,9 @@ void main(void) {
     /* Main game loop: init -> play -> end -> repeat */
     for (;;) {
         SMS_VRAMmemsetW(0, 0, 16 * 1024);
+        SMS_initSprites();
+        SMS_finalizeSprites();
+        SMS_copySpritestoSAT();
         init_world();
         draw_room();
         draw_sprites();
