@@ -222,10 +222,11 @@ var SmsExporter = (function () {
             var frames = getDrawing(e.drwId);
             var frame0 = frames[0]; // 8×8 array
             var frame1 = frames.length > 1 ? frames[1] : null;
-            // isWall: only meaningful for tiles; read from world.tile[id].isWall
+            // isWall: tiles block movement unless explicitly set to false.
+            // isWall===true -> wall, isWall===null -> wall (SMS default), isWall===false -> passable.
             var isWallFlag = 0;
             if (world.tile && world.tile[e.id]) {
-                isWallFlag = world.tile[e.id].isWall ? 1 : 0;
+                isWallFlag = (world.tile[e.id].isWall !== false) ? 1 : 0;
             }
             w.u16(idToU16(e.id));
             w.u8(frame1 ? 2 : 1); // frame count
@@ -402,9 +403,9 @@ var SmsExporter = (function () {
             (room.walls || []).forEach(function (tid) {
                 if (tid && tid !== '0' && tileIndexMap[tid]) wallSet[tid] = true;
             });
-            // per-tile isWall flags
+            // per-tile isWall flags: treat null as wall (SMS default)
             Object.keys(world.tile).forEach(function (tid) {
-                if (world.tile[tid].isWall === true) wallSet[tid] = true;
+                if (world.tile[tid].isWall !== false) wallSet[tid] = true;
             });
             var wallList = Object.keys(wallSet).map(function (tid) { return tileIndexMap[tid]; })
                                .filter(function (v) { return v > 0; });
