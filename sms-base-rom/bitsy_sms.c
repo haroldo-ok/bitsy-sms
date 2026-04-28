@@ -596,7 +596,8 @@ static void dlg_advance(void) {
             player_y    = pending_y;
             apply_palette(cur_room.pal_idx);
         }
-        /* Redraw room to erase dialog box */
+        /* Erase dialog box by redrawing the map rows it overlaps,
+           then blanking any remaining box rows below the map. */
         {
             unsigned char x, y, i;
             for (y = 0; y < MAP_H; y++)
@@ -611,6 +612,7 @@ static void dlg_advance(void) {
                     (unsigned int)(itm_vdp_for(it->id)));
             }
         }
+        dlg_clear_box();
     } else {
         dlg_page++;
         dlg_show_page();
@@ -963,8 +965,6 @@ void main(void) {
         draw_room();
         draw_sprites();
         SMS_copySpritestoSAT();
-        /* Title dialog (id 0) */
-        dlg_start(0);
         SMS_displayOn();
 
         /* Gameplay */
