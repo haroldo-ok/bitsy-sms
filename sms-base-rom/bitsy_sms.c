@@ -306,10 +306,7 @@ static unsigned char  num_vars;
 static Variable       vars[MAX_VARS];
 
 /* Dialog */
-static char           dlg_text[256];
-static unsigned char  dlg_active;
-static unsigned char  dlg_page;
-static unsigned char  dlg_done;
+/* Dialog state variables are declared in the VM section below */
 
 /* Deferred exit (queued while dialog is open) */
 static unsigned char  pending_exit;
@@ -518,76 +515,344 @@ static void load_room(unsigned int target_id) {
 }
 
 /* =========================================================
- * Dialog
+ * Dialog bytecode VM
+ * (see vm_design.h for full opcode specification)
  * ========================================================= */
 
-static unsigned char load_dialog_text(unsigned int dlg_id) {
-    const unsigned char *p = res_get("dlg.dat");
-    unsigned int n, i;
-    if (!p) return 0;
-    n = read_u16(&p);
-    for (i = 0; i < n; i++) {
-        unsigned int id  = read_u16(&p);
-        unsigned int len = read_u16(&p);
-        if (id == dlg_id) {
-            unsigned int cp = len < 255 ? len : 255;
-            memcpy(dlg_text, p, cp);
-            dlg_text[cp] = '\0';
-            return 1;
-        }
-        p += len;
-    }
+/* --- Opcode constants --- */
+#define OP_SAY    0x01
+#define OP_BR     0x02
+#define OP_PG     0x03
+#define OP_PUSHI  0x10
+#define OP_PUSHS  0x11
+#define OP_POP    0x12
+#define OP_DUP    0x13
+#define OP_ADD    0x20
+#define OP_SUB    0x21
+#define OP_MUL    0x22
+#define OP_DIV    0x23
+#define OP_EQ     0x28
+#define OP_GT     0x2A
+#define OP_LT     0x2B
+#define OP_GTE    0x2C
+#define OP_LTE    0x2D
+#define OP_LOADV  0x30
+#define OP_STOREV 0x31
+#define OP_LOADI  0x32
+#define OP_STOREI 0x33
+#define OP_JMP    0x40
+#define OP_JZ     0x41
+#define OP_JNZ    0x42
+#define OP_SEQ    0x48
+#define OP_CYC    0x49
+#define OP_SHF    0x4A
+#define OP_PAL    0x50
+#define OP_AVA    0x51
+#define OP_TUNE   0x52
+#define OP_BLIP   0x53
+#define OP_PROP   0x54
+#define OP_PROPS  0x55
+#define OP_EXITR  0x56
+#define OP_END    0x57
+#define OP_HALT   0xFF
+
+/* --- VM RAM state --- */
+#define VM_STACK_DEPTH  8
+#define VM_CTR_COUNT   16
+
+static int            vm_stack[VM_STACK_DEPTH];
+static unsigned char  vm_sp;
+static unsigned char  vm_counters[VM_CTR_COUNT];
+
+static const unsigned char *vm_bc;       /* ROM pointer to bytecode start  */
+static const unsigned char *vm_pool;     /* ROM pointer to string pool      */
+static unsigned int          vm_bc_len;
+static unsigned int          vm_pc;
+
+static char           dlg_text[256];
+static unsigned char  dlg_text_len;
+static unsigned char  dlg_active;
+static unsigned char  dlg_done;
+static unsigned char  dlg_prop_locked;
+
+/* --- Stack helpers --- */
+static void vm_push(int v) {
+    if (vm_sp < VM_STACK_DEPTH) vm_stack[vm_sp++] = v;
+}
+static int vm_pop(void) {
+    if (vm_sp > 0) return vm_stack[--vm_sp];
     return 0;
 }
+static int vm_peek(void) {
+    return vm_sp > 0 ? vm_stack[vm_sp - 1] : 0;
+}
 
+/* --- String pool: 1-based index, 0 = empty string --- */
+static const unsigned char *vm_pool_str(unsigned char idx) {
+    const unsigned char *p;
+    unsigned char i;
+    if (idx == 0 || !vm_pool) return (const unsigned char *)"";
+    p = vm_pool;
+    for (i = 1; i < idx; i++) { while (*p) p++; p++; }
+    return p;
+}
+
+/* --- Text buffer helpers --- */
+static void dlg_append_str(const unsigned char *s) {
+    while (*s && dlg_text_len < 254)
+        dlg_text[dlg_text_len++] = (char)*s++;
+    dlg_text[dlg_text_len] = '\0';
+}
+static void dlg_append_ch(char ch) {
+    if (dlg_text_len < 254) {
+        dlg_text[dlg_text_len++] = ch;
+        dlg_text[dlg_text_len]   = '\0';
+    }
+}
+
+/* --- Box rendering --- */
 static void dlg_draw_box(void) {
     unsigned char x, y;
     for (y = DBOX_Y; y < DBOX_Y + DBOX_H; y++)
         for (x = DBOX_X; x < DBOX_X + DBOX_W; x++)
             put_bg_tile(x, y, (unsigned int)(VDPTILE_SOLID));
 }
-
 static void dlg_clear_box(void) {
     unsigned char x, y;
     for (y = DBOX_Y; y < DBOX_Y + DBOX_H; y++)
         for (x = DBOX_X; x < DBOX_X + DBOX_W; x++)
             put_bg_tile(x, y, (unsigned int)(VDPTILE_BLANK));
 }
-
-static void dlg_show_page(void) {
-    unsigned int  page_size = DBOX_ROWS * DBOX_CPR;
-    unsigned int  pos       = (unsigned int)dlg_page * page_size;
-    unsigned int  len       = strlen(dlg_text);
+static void dlg_render_text(void) {
+    unsigned int  pos = 0, len = strlen(dlg_text);
     unsigned char row = 0, col = 0;
-
     dlg_draw_box();
-
     while (pos < len && row < DBOX_ROWS) {
         char ch = dlg_text[pos++];
         if (ch == '\n') { row++; col = 0; continue; }
         put_char(DBOX_X + 1 + col, DBOX_Y + 1 + row, ch);
         if (++col >= DBOX_CPR) { col = 0; row++; }
     }
-
-    dlg_done = (pos >= len);
-    if (!dlg_done)
-        put_char(DBOX_X + DBOX_W - 2, DBOX_Y + DBOX_H - 2, '>');
 }
 
+/* --- Erase dialog box and redraw map underneath --- */
+static void dlg_erase(void) {
+    unsigned char x, y, i;
+    for (y = 0; y < MAP_H; y++)
+        for (x = 0; x < MAP_W; x++) {
+            unsigned char tid = cur_room.tilemap[y][x];
+            put_bg_tile(MAP_ORIGIN_X + x, MAP_ORIGIN_Y + y,
+                (unsigned int)(tid ? tile_vdp_for(tid) : VDPTILE_BLANK));
+        }
+    for (i = 0; i < cur_room.item_count; i++) {
+        RoomItem *it = &cur_room.items[i];
+        put_bg_tile(MAP_ORIGIN_X + it->x, MAP_ORIGIN_Y + it->y,
+            (unsigned int)(itm_vdp_for(it->id)));
+    }
+    dlg_clear_box();
+}
+
+/* =========================================================
+ * VM execution: run until PG (returns 0) or HALT (returns 1)
+ * ========================================================= */
+static unsigned char vm_run(void) {
+    unsigned char op;
+    int a, b;
+    unsigned char idx, n, ctr;
+    signed char off;
+
+    for (;;) {
+        if (vm_pc >= vm_bc_len) return 1;
+        op = vm_bc[vm_pc++];
+
+        switch (op) {
+
+        case OP_SAY:
+            idx = vm_bc[vm_pc++];
+            dlg_append_str(vm_pool_str(idx));
+            break;
+        case OP_BR:
+            dlg_append_ch('\n');
+            break;
+        case OP_PG:
+            dlg_render_text();
+            put_char(DBOX_X + DBOX_W - 2, DBOX_Y + DBOX_H - 2, '>');
+            dlg_text_len = 0; dlg_text[0] = '\0';
+            return 0;
+
+        case OP_PUSHI:
+            a  = (int)(unsigned char)vm_bc[vm_pc++];
+            a |= (int)(unsigned char)vm_bc[vm_pc++] << 8;
+            if (a & 0x8000) a = (int)((unsigned int)a | 0xFFFF0000u);
+            vm_push(a);
+            break;
+        case OP_PUSHS: vm_pc++; vm_push(0); break;
+        case OP_POP:   vm_pop(); break;
+        case OP_DUP:   vm_push(vm_peek()); break;
+
+        case OP_ADD: b=vm_pop(); a=vm_pop(); vm_push(a+b); break;
+        case OP_SUB: b=vm_pop(); a=vm_pop(); vm_push(a-b); break;
+        case OP_MUL: b=vm_pop(); a=vm_pop(); vm_push(a*b); break;
+        case OP_DIV: b=vm_pop(); a=vm_pop(); vm_push(b?a/b:0); break;
+
+        case OP_EQ:  b=vm_pop(); a=vm_pop(); vm_push(a==b?1:0); break;
+        case OP_GT:  b=vm_pop(); a=vm_pop(); vm_push(a> b?1:0); break;
+        case OP_LT:  b=vm_pop(); a=vm_pop(); vm_push(a< b?1:0); break;
+        case OP_GTE: b=vm_pop(); a=vm_pop(); vm_push(a>=b?1:0); break;
+        case OP_LTE: b=vm_pop(); a=vm_pop(); vm_push(a<=b?1:0); break;
+
+        case OP_LOADV:
+            idx = vm_bc[vm_pc++];
+            vm_push(idx < (unsigned char)num_vars ? vars[idx].value : 0);
+            break;
+        case OP_STOREV:
+            idx = vm_bc[vm_pc++];
+            if (idx < (unsigned char)num_vars) vars[idx].value = vm_pop();
+            else vm_pop();
+            break;
+        case OP_LOADI:
+            idx = vm_bc[vm_pc++];
+            vm_push(idx < (unsigned char)num_items ? item_counts[idx] : 0);
+            break;
+        case OP_STOREI:
+            idx = vm_bc[vm_pc++];
+            a   = vm_pop(); if (a < 0) a = 0;
+            if (idx < (unsigned char)num_items) item_counts[idx] = a;
+            break;
+
+        case OP_JMP:
+            off = (signed char)vm_bc[vm_pc++];
+            vm_pc = (unsigned int)((int)vm_pc + (int)off);
+            break;
+        case OP_JZ:
+            off = (signed char)vm_bc[vm_pc++];
+            a   = vm_pop();
+            if (!a) vm_pc = (unsigned int)((int)vm_pc + (int)off);
+            break;
+        case OP_JNZ:
+            off = (signed char)vm_bc[vm_pc++];
+            a   = vm_pop();
+            if (a) vm_pc = (unsigned int)((int)vm_pc + (int)off);
+            break;
+
+        case OP_SEQ:
+            ctr = vm_bc[vm_pc++]; n = vm_bc[vm_pc++];
+            { unsigned char v = ctr<VM_CTR_COUNT?vm_counters[ctr]:0;
+              vm_push((int)v);
+              if (ctr<VM_CTR_COUNT && v+1<n) vm_counters[ctr]++; }
+            break;
+        case OP_CYC:
+            ctr = vm_bc[vm_pc++]; n = vm_bc[vm_pc++];
+            { unsigned char v = ctr<VM_CTR_COUNT?vm_counters[ctr]:0;
+              vm_push((int)v);
+              if (ctr<VM_CTR_COUNT) vm_counters[ctr]=(unsigned char)((v+1)%n); }
+            break;
+        case OP_SHF:
+            ctr = vm_bc[vm_pc++]; n = vm_bc[vm_pc++];
+            { unsigned char v = ctr<VM_CTR_COUNT?vm_counters[ctr]:0;
+              vm_push((int)(v%n));
+              if (ctr<VM_CTR_COUNT) vm_counters[ctr]=(unsigned char)(((unsigned int)v*5+3)&0xFF); }
+            break;
+
+        case OP_PAL:
+            idx = vm_bc[vm_pc++];
+            apply_palette(idx); cur_room.pal_idx = idx;
+            break;
+        case OP_AVA:
+            idx = vm_bc[vm_pc++];
+            if (idx < (unsigned char)num_sprites) avatar_spr_id = spr_ids[idx];
+            break;
+        case OP_TUNE: vm_pc++; break;   /* PSGlib not yet wired */
+        case OP_BLIP: vm_pc++; break;
+
+        case OP_PROP:
+            vm_pc++;
+            vm_push((int)dlg_prop_locked);
+            break;
+        case OP_PROPS:
+            vm_pc++;
+            dlg_prop_locked = (unsigned char)(vm_pop() ? 1 : 0);
+            break;
+
+        case OP_EXITR:
+            { unsigned int rid = (unsigned int)vm_bc[vm_pc] | ((unsigned int)vm_bc[vm_pc+1]<<8);
+              unsigned char dx  = vm_bc[vm_pc+2];
+              unsigned char dy  = vm_bc[vm_pc+3];
+              vm_pc += 4;
+              pending_exit = 1; pending_room = rid;
+              pending_x = dx;   pending_y    = dy; }
+            break;
+
+        case OP_END:
+            game_over = 1;
+            break;
+
+        case OP_HALT:
+        default:
+            if (dlg_text_len > 0) {
+                dlg_render_text();
+                dlg_done = 1;
+                return 0;
+            }
+            return 1;
+        }
+    }
+}
+
+/* =========================================================
+ * Public dialog interface
+ * ========================================================= */
+
 static void dlg_start(unsigned int dlg_id) {
-    if (dlg_id == NO_ID) return;
-    if (!load_dialog_text(dlg_id)) return;
-    dlg_active = 1;
-    dlg_page   = 0;
-    dlg_done   = 0;
-    dlg_show_page();
+    const unsigned char *p = res_get("dlg.dat");
+    unsigned int n, i;
+    if (!p || dlg_id == NO_ID) return;
+
+    n = read_u16(&p);
+    for (i = 0; i < n; i++) {
+        unsigned int id   = read_u16(&p);
+        unsigned int blen = read_u16(&p);
+        if (id == dlg_id) {
+            unsigned int plen;
+            vm_bc     = p;
+            vm_bc_len = blen;
+            p += blen;
+            plen    = read_u16(&p);
+            vm_pool = p;
+            (void)plen;
+            goto dlg_found;
+        }
+        /* skip: blen bytes bytecode, 2 bytes plen, plen bytes pool */
+        p += blen;
+        { unsigned int pl = read_u16(&p); p += pl; }
+    }
+    return;
+
+dlg_found:
+    dlg_active   = 1;
+    dlg_done     = 0;
+    vm_pc        = 0;
+    vm_sp        = 0;
+    dlg_text_len = 0;
+    dlg_text[0]  = '\0';
+
+    if (vm_run()) {
+        /* Script finished in one pass */
+        if (dlg_text_len > 0) {
+            dlg_render_text();
+            dlg_done = 1;
+        } else {
+            dlg_active = 0; /* no text at all */
+        }
+    }
+    /* else: suspended at PG, page already rendered */
 }
 
 static void dlg_advance(void) {
     if (!dlg_active) return;
+
     if (dlg_done) {
         dlg_active = 0;
-        /* Execute deferred exit if one is waiting */
         if (pending_exit) {
             pending_exit = 0;
             load_room(pending_room);
@@ -596,29 +861,23 @@ static void dlg_advance(void) {
             player_y    = pending_y;
             apply_palette(cur_room.pal_idx);
         }
-        /* Erase dialog box by redrawing the map rows it overlaps,
-           then blanking any remaining box rows below the map. */
-        {
-            unsigned char x, y, i;
-            for (y = 0; y < MAP_H; y++)
-                for (x = 0; x < MAP_W; x++) {
-                    unsigned char tid = cur_room.tilemap[y][x];
-                    put_bg_tile(MAP_ORIGIN_X + x, MAP_ORIGIN_Y + y,
-                        (unsigned int)(tid ? tile_vdp_for(tid) : VDPTILE_BLANK));
-                }
-            for (i = 0; i < cur_room.item_count; i++) {
-                RoomItem *it = &cur_room.items[i];
-                put_bg_tile(MAP_ORIGIN_X + it->x, MAP_ORIGIN_Y + it->y,
-                    (unsigned int)(itm_vdp_for(it->id)));
-            }
+        dlg_erase();
+        return;
+    }
+
+    /* Resume VM from suspension point */
+    dlg_text_len = 0; dlg_text[0] = '\0';
+    if (vm_run()) {
+        if (dlg_text_len > 0) {
+            dlg_render_text();
+            dlg_done = 1;
+        } else {
+            /* Script done, no trailing text */
+            dlg_done = 1;
+            dlg_advance();
         }
-        dlg_clear_box();
-    } else {
-        dlg_page++;
-        dlg_show_page();
     }
 }
-
 /* =========================================================
  * Map / sprite rendering
  * ========================================================= */

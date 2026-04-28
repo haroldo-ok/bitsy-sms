@@ -474,37 +474,525 @@ var SmsExporter = (function () {
      * Dialog file builder (dlg.dat)
      * ----------------------------------------------------- */
 
-    function buildDlgFile(world) {
-        var w       = new ByteWriter();
+    /* -------------------------------------------------------
+     * Dialog bytecode compiler
+     *
+     * Opcodes (see vm_design.h for full spec):
+     *   SAY 0x01 idx    PUSHI 0x10 lo hi   ADD 0x20   EQ 0x28
+     *   BR  0x02        PUSHS 0x11 idx     SUB 0x21   GT 0x2A
+     *   PG  0x03        POP   0x12         MUL 0x22   LT 0x2B
+     *                   DUP   0x13         DIV 0x23   GTE 0x2C
+     *   LOADV  0x30 i   STOREV 0x31 i               LTE 0x2D
+     *   LOADI  0x32 i   STOREI 0x33 i
+     *   JMP 0x40 off    JZ 0x41 off  JNZ 0x42 off
+     *   SEQ 0x48 ctr n  CYC 0x49 ctr n  SHF 0x4A ctr n
+     *   PAL 0x50 i  AVA 0x51 i  TUNE 0x52 i  BLIP 0x53 i
+     *   PROP 0x54 i  PROPS 0x55 i
+     *   EXITR 0x56 room_lo room_hi x y
+     *   END 0x57    HALT 0xFF
+     * ----------------------------------------------------- */
+
+    var OP = {
+        SAY:0x01, BR:0x02, PG:0x03,
+        PUSHI:0x10, PUSHS:0x11, POP:0x12, DUP:0x13,
+        ADD:0x20, SUB:0x21, MUL:0x22, DIV:0x23,
+        EQ:0x28, GT:0x2A, LT:0x2B, GTE:0x2C, LTE:0x2D,
+        LOADV:0x30, STOREV:0x31, LOADI:0x32, STOREI:0x33,
+        JMP:0x40, JZ:0x41, JNZ:0x42,
+        SEQ:0x48, CYC:0x49, SHF:0x4A,
+        PAL:0x50, AVA:0x51, TUNE:0x52, BLIP:0x53,
+        PROP:0x54, PROPS:0x55, EXITR:0x56, END:0x57,
+        HALT:0xFF,
+    };
+
+    /* Emitter helper: wraps a byte array with patching support */
+    function Emitter() {
+        this._buf = [];
+        this._strings = ['']; // index 0 = empty string
+    }
+    Emitter.prototype.pos    = function () { return this._buf.length; };
+    Emitter.prototype.emit   = function (b) { this._buf.push(b & 0xFF); };
+    Emitter.prototype.emit16 = function (v) { this.emit(v & 0xFF); this.emit((v >> 8) & 0xFF); };
+    Emitter.prototype.patch  = function (pos, b) { this._buf[pos] = b & 0xFF; };
+    /* Emit a forward JZ/JNZ/JMP with a placeholder; return the address to patch */
+    Emitter.prototype.emitJump = function (op) {
+        this.emit(op);
+        var pos = this.pos();
+        this.emit(0); // placeholder offset
+        return pos;
+    };
+    /* Patch a previously emitted jump placeholder with the correct signed offset */
+    Emitter.prototype.patchJump = function (patchPos) {
+        var target = this.pos();
+        var offset = target - (patchPos + 1); // +1 because offset is from NEXT instruction
+        if (offset > 127 || offset < -128) offset = 0; // safety; compiler avoids this
+        this.patch(patchPos, offset & 0xFF);
+    };
+    /* Add a string to the pool, return its 1-based index (0 = empty) */
+    Emitter.prototype.addString = function (s) {
+        var idx = this._strings.indexOf(s);
+        if (idx >= 1) return idx;
+        this._strings.push(s);
+        return this._strings.length - 1;
+    };
+    /* Emit SAY for a text string */
+    Emitter.prototype.emitSay = function (text) {
+        if (!text) return;
+        var idx = this.addString(text);
+        this.emit(OP.SAY); this.emit(idx & 0xFF);
+    };
+    /* Serialise: bytecode bytes + strpool */
+    Emitter.prototype.toBytes = function () {
+        var out = this._buf.slice();
+        // string pool: skip index 0 (empty), write each as null-terminated
+        var pool = [];
+        for (var i = 1; i < this._strings.length; i++) {
+            var s = this._strings[i];
+            for (var j = 0; j < s.length; j++) pool.push(s.charCodeAt(j) & 0xFF);
+            pool.push(0); // null terminator
+        }
+        var result = [];
+        // bytecode length u16
+        result.push(out.length & 0xFF);
+        result.push((out.length >> 8) & 0xFF);
+        // bytecode
+        for (var i = 0; i < out.length; i++) result.push(out[i]);
+        // strpool length u16
+        result.push(pool.length & 0xFF);
+        result.push((pool.length >> 8) & 0xFF);
+        // strpool
+        for (var i = 0; i < pool.length; i++) result.push(pool[i]);
+        return result;
+    };
+
+    /* ---- Compiler context ---- */
+    function CompilerCtx(world, tileIndexMap, palIdxMap) {
+        this.world        = world;
+        this.tileIndexMap = tileIndexMap;
+        this.palIdxMap    = palIdxMap;
+        // var name -> index in vars array
+        this.varIdx = {};
+        var varNames = Object.keys(world.variable || {});
+        for (var i = 0; i < varNames.length; i++) this.varIdx[varNames[i]] = i;
+        // item string-id -> sequential index (matching itm.dat order)
+        this.itmIdx = {};
+        var itmKeys = Object.keys(world.item || {});
+        for (var i = 0; i < itmKeys.length; i++) this.itmIdx[itmKeys[i]] = i;
+        // sprite string-id -> sequential index (matching spr.dat order, avatar first)
+        this.sprIdx = {};
+        var sprKeys = ['A'];
+        Object.keys(world.sprite || {}).forEach(function(s){ if(s!=='A') sprKeys.push(s); });
+        for (var i = 0; i < sprKeys.length; i++) this.sprIdx[sprKeys[i]] = i;
+        // counter allocation for sequence/cycle/shuffle nodes
+        this._nextCtr = 0;
+        this._nodeCtrs = {}; // nodeId -> counter index
+    }
+    CompilerCtx.prototype.allocCtr = function (nodeId) {
+        if (this._nodeCtrs[nodeId] === undefined) {
+            this._nodeCtrs[nodeId] = this._nextCtr++;
+        }
+        return this._nodeCtrs[nodeId];
+    };
+
+    /* ---- Recursive AST compiler ---- */
+
+    function compileNode(node, em, ctx) {
+        if (!node) return;
+
+        switch (node.type) {
+
+        case 'dialog_block':
+            // Evaluate children in order
+            for (var i = 0; i < node.children.length; i++)
+                compileNode(node.children[i], em, ctx);
+            break;
+
+        case 'function':
+            compileFuncNode(node, em, ctx);
+            break;
+
+        case 'literal':
+            // Standalone literal (rare; emitted as say)
+            if (node.value !== null && node.value !== undefined) {
+                if (typeof node.value === 'string') {
+                    em.emitSay(node.value);
+                } else {
+                    em.emit(OP.PUSHI); em.emit16(Math.round(node.value));
+                }
+            }
+            break;
+
+        case 'variable':
+            {
+                var vi = ctx.varIdx[node.name];
+                if (vi !== undefined) {
+                    em.emit(OP.LOADV); em.emit(vi & 0xFF);
+                } else {
+                    em.emit(OP.PUSHI); em.emit16(0); // unknown var = 0
+                }
+            }
+            break;
+
+        case 'operator':
+            compileExpNode(node, em, ctx);
+            break;
+
+        case 'if':
+            compileIfNode(node, em, ctx);
+            break;
+
+        case 'condition_pair':
+            // Handled inside compileIfNode
+            break;
+
+        case 'sequence':
+            compileSeqNode(node, em, ctx, OP.SEQ);
+            break;
+
+        case 'cycle':
+            compileSeqNode(node, em, ctx, OP.CYC);
+            break;
+
+        case 'shuffle':
+            compileSeqNode(node, em, ctx, OP.SHF);
+            break;
+
+        case 'else':
+            // ElseNode evaluates to true; used as the last condition in if chain
+            // Handled in compileIfNode
+            break;
+
+        default:
+            // Unknown node: skip
+            break;
+        }
+    }
+
+    function compileFuncNode(node, em, ctx) {
+        var name = node.name;
+        var args = node.args || [];
+
+        // Helper: get literal string value of first arg
+        function arg0str() {
+            if (!args[0]) return '';
+            if (args[0].type === 'literal') return '' + args[0].value;
+            return '';
+        }
+        function arg0num() {
+            if (!args[0]) return 0;
+            if (args[0].type === 'literal') return Math.round(args[0].value) || 0;
+            return 0;
+        }
+
+        switch (name) {
+        case 'say': case 'print':
+            // say("text") — the arg may be a literal string or an expression
+            if (args[0] && args[0].type === 'literal' && typeof args[0].value === 'string') {
+                // strip text effect tags from inline say text
+                var text = args[0].value.replace(/\{[^}]*\}/g, '');
+                if (text) em.emitSay(text);
+            } else if (args[0]) {
+                // Expression: evaluate, push result, then SAY the stringified value
+                // We approximate: if it's a variable, emit LOADV then a special SAYS
+                // For simplicity, treat as unknown text (no-op for non-literal say)
+                compileNode(args[0], em, ctx);
+                em.emit(OP.POP); // discard — we can't say non-literal expressions on SMS
+            }
+            break;
+
+        case 'br':
+            em.emit(OP.BR);
+            break;
+
+        case 'pg':
+            em.emit(OP.PG);
+            break;
+
+        // Text effects — strip on SMS (no visual effect support)
+        case 'wvy': case '/wvy': case 'shk': case '/shk':
+        case 'rbw': case '/rbw': case 'clr': case '/clr':
+        case 'clr1': case 'clr2': case 'clr3':
+        case 'drws': case 'drwt': case 'drwi':
+        case 'printTile': case 'printSprite': case 'printItem':
+            // No-op on SMS
+            break;
+
+        case 'item':
+            // item(id) -> read count; item(id, val) -> set count
+            {
+                var itemId = arg0str();
+                // resolve name to id
+                if (ctx.world.names && ctx.world.names.item && ctx.world.names.item[itemId] !== undefined)
+                    itemId = ctx.world.names.item[itemId];
+                var ii = ctx.itmIdx[itemId];
+                if (ii === undefined) { em.emit(OP.PUSHI); em.emit16(0); break; }
+                if (args.length > 1) {
+                    // set: compile second arg then STOREI
+                    compileNode(args[1], em, ctx);
+                    em.emit(OP.STOREI); em.emit(ii & 0xFF);
+                    // then push updated value
+                    em.emit(OP.LOADI); em.emit(ii & 0xFF);
+                } else {
+                    em.emit(OP.LOADI); em.emit(ii & 0xFF);
+                }
+            }
+            break;
+
+        case 'property':
+            // property("locked") or property("locked", value)
+            {
+                var propName = arg0str(); // e.g. "locked"
+                var propId = (propName === 'locked') ? 0 : 0;
+                if (args.length > 1) {
+                    compileNode(args[1], em, ctx);
+                    em.emit(OP.PROPS); em.emit(propId);
+                } else {
+                    em.emit(OP.PROP); em.emit(propId);
+                }
+            }
+            break;
+
+        case 'end':
+            em.emit(OP.END);
+            break;
+
+        case 'exit':
+            // exit(roomId, x, y) or exit(roomId, x, y, transition)
+            {
+                var roomId = arg0str();
+                if (ctx.world.names && ctx.world.names.room && ctx.world.names.room[roomId] !== undefined)
+                    roomId = ctx.world.names.room[roomId];
+                var rid16 = idToU16(roomId);
+                var dx = args[1] ? Math.round(parseFloat(args[1].value) || 0) : 0;
+                var dy = args[2] ? Math.round(parseFloat(args[2].value) || 0) : 0;
+                em.emit(OP.EXITR);
+                em.emit16(rid16);
+                em.emit(dx & 0xFF);
+                em.emit(dy & 0xFF);
+            }
+            break;
+
+        case 'pal':
+            {
+                var palId = arg0str();
+                if (ctx.world.names && ctx.world.names.palette && ctx.world.names.palette[palId] !== undefined)
+                    palId = ctx.world.names.palette[palId];
+                var pi = ctx.palIdxMap ? (ctx.palIdxMap[palId] || 0) : 0;
+                em.emit(OP.PAL); em.emit(pi & 0xFF);
+            }
+            break;
+
+        case 'ava':
+            {
+                var sprId = arg0str();
+                if (ctx.world.names && ctx.world.names.sprite && ctx.world.names.sprite[sprId] !== undefined)
+                    sprId = ctx.world.names.sprite[sprId];
+                var si = ctx.sprIdx[sprId];
+                if (si === undefined) si = 0;
+                em.emit(OP.AVA); em.emit(si & 0xFF);
+            }
+            break;
+
+        case 'tune':
+            {
+                var tuneId = arg0str();
+                // tuneId "0" = stop. We store tune sequential index.
+                var ti = tuneId === '0' ? 0 : (parseInt(tuneId, 10) || 0);
+                em.emit(OP.TUNE); em.emit(ti & 0xFF);
+            }
+            break;
+
+        case 'blip':
+            {
+                var blipId = arg0str();
+                var bi = parseInt(blipId, 10) || 0;
+                em.emit(OP.BLIP); em.emit(bi & 0xFF);
+            }
+            break;
+
+        default:
+            // Unknown function — evaluate args and discard (defensive)
+            for (var i = 0; i < args.length; i++) {
+                compileNode(args[i], em, ctx);
+                em.emit(OP.POP);
+            }
+            break;
+        }
+    }
+
+    function compileExpNode(node, em, ctx) {
+        var op = node.operator;
+
+        if (op === '=') {
+            // assignment: left must be variable
+            if (node.left && node.left.type === 'variable') {
+                compileNode(node.right, em, ctx);
+                var vi = ctx.varIdx[node.left.name];
+                if (vi !== undefined) {
+                    em.emit(OP.STOREV); em.emit(vi & 0xFF);
+                    // push the stored value back (setExp returns the new value)
+                    em.emit(OP.LOADV); em.emit(vi & 0xFF);
+                } else {
+                    // store to item count if name matches an item id
+                    var ii = ctx.itmIdx[node.left.name];
+                    if (ii !== undefined) {
+                        em.emit(OP.STOREI); em.emit(ii & 0xFF);
+                        em.emit(OP.LOADI); em.emit(ii & 0xFF);
+                    } else {
+                        em.emit(OP.POP); em.emit(OP.PUSHI); em.emit16(0);
+                    }
+                }
+            }
+            return;
+        }
+
+        // Binary operator: push left then right, then opcode
+        // Handle null left (negative number): -right
+        if (op === '-' && node.left && node.left.type === 'literal' && node.left.value === null) {
+            em.emit(OP.PUSHI); em.emit16(0);
+            compileNode(node.right, em, ctx);
+            em.emit(OP.SUB);
+            return;
+        }
+
+        compileNode(node.left, em, ctx);
+        compileNode(node.right, em, ctx);
+
+        switch (op) {
+        case '+':  em.emit(OP.ADD); break;
+        case '-':  em.emit(OP.SUB); break;
+        case '*':  em.emit(OP.MUL); break;
+        case '/':  em.emit(OP.DIV); break;
+        case '==': em.emit(OP.EQ);  break;
+        case '>':  em.emit(OP.GT);  break;
+        case '<':  em.emit(OP.LT);  break;
+        case '>=': em.emit(OP.GTE); break;
+        case '<=': em.emit(OP.LTE); break;
+        default:   em.emit(OP.POP); em.emit(OP.POP); em.emit(OP.PUSHI); em.emit16(0); break;
+        }
+    }
+
+    function compileIfNode(node, em, ctx) {
+        // node.children = [ConditionPairNode, ...]
+        // Each ConditionPairNode has children[0]=condition, children[1]=result block
+        var jumpEnds = []; // positions of JMP-to-end instructions to patch
+
+        for (var i = 0; i < node.children.length; i++) {
+            var pair = node.children[i];
+            var condition = pair.children[0];
+            var result    = pair.children[1];
+
+            var isElse = condition && condition.type === 'else';
+
+            if (!isElse) {
+                // Evaluate condition
+                compileNode(condition, em, ctx);
+                // JZ over the result block
+                var skipJump = em.emitJump(OP.JZ);
+                // Compile result
+                compileNode(result, em, ctx);
+                // JMP to end (skip remaining else-if/else branches)
+                if (i < node.children.length - 1) {
+                    jumpEnds.push(em.emitJump(OP.JMP));
+                }
+                // Patch the skip jump to here
+                em.patchJump(skipJump);
+            } else {
+                // else branch — just compile the result
+                compileNode(result, em, ctx);
+            }
+        }
+
+        // Patch all end-jumps to current position
+        for (var j = 0; j < jumpEnds.length; j++) {
+            em.patchJump(jumpEnds[j]);
+        }
+    }
+
+    function compileSeqNode(node, em, ctx, opcode) {
+        // Allocate a counter for this node instance
+        var nodeId = node.GetId ? node.GetId() : ('' + Math.random());
+        var ctrId = ctx.allocCtr(nodeId);
+        var n = node.children.length;
+
+        // SEQ/CYC/SHF ctr n: pushes the selected child index (0..n-1)
+        em.emit(opcode);
+        em.emit(ctrId & 0xFF);
+        em.emit(n & 0xFF);
+
+        // Generate a dispatch: if index == k, execute child k, jump to end
+        // We use a chain of: DUP, PUSHI k, EQ, JZ next_k, POP, <child_k>, JMP end
+        var jumpEnds = [];
+
+        for (var k = 0; k < n; k++) {
+            em.emit(OP.DUP);
+            em.emit(OP.PUSHI); em.emit16(k);
+            em.emit(OP.EQ);
+            var skipJump = em.emitJump(OP.JZ);
+            em.emit(OP.POP); // discard the index
+            compileNode(node.children[k], em, ctx);
+            if (k < n - 1) jumpEnds.push(em.emitJump(OP.JMP));
+            em.patchJump(skipJump);
+        }
+
+        // Final POP to discard index (for the last case which didn't JMP)
+        em.emit(OP.POP);
+
+        // Patch end-jumps
+        for (var j = 0; j < jumpEnds.length; j++) em.patchJump(jumpEnds[j]);
+    }
+
+    /* ---- Compile one dialog src string to bytecode ---- */
+    function compileDialog(src, ctx) {
+        var em = new Emitter();
+
+        // Parse the dialog AST using Bitsy's parser
+        var scriptObj = null;
+        try {
+            if (typeof Script !== 'undefined') {
+                var s = new Script();
+                var interp = s.CreateInterpreter();
+                scriptObj = interp.Parse(src, 'sms_compile');
+            }
+        } catch (e) {
+            scriptObj = null;
+        }
+
+        if (scriptObj) {
+            compileNode(scriptObj, em, ctx);
+        } else {
+            // Fallback: plain text extract (no AST available at compile time)
+            var text = extractPlainText(src);
+            if (text) em.emitSay(text);
+        }
+
+        em.emit(OP.HALT);
+        return em.toBytes();
+    }
+
+    /* ---- Build dlg.dat with bytecode ---- */
+    function buildDlgFile(world, tileIndexMap, palIdxMap) {
+        var w   = new ByteWriter();
+
+        // Build compiler context once for all dialogs
+        var ctx = new CompilerCtx(world, tileIndexMap, palIdxMap);
+
         var entries = [];
-
-        // Collect all dialogs (including title=0)
         Object.keys(world.dialog).forEach(function (did) {
-            var dlg  = world.dialog[did];
-            var text = extractPlainText(dlg.src);
-            entries.push({ id: idToU16(did), text: text });
+            var dlg = world.dialog[did];
+            var bc  = compileDialog(dlg.src || '', ctx);
+            entries.push({ id: idToU16(did), bc: bc });
         });
-
-        // Also collect item dialogs (by item id convention: item id → dialog id)
-        // Items already have dlg field pointing to a dialog, which is already in world.dialog.
-        // Nothing extra needed here.
 
         w.u16(entries.length);
         entries.forEach(function (e) {
-            var bytes = [];
-            for (var i = 0; i < e.text.length; i++)
-                bytes.push(e.text.charCodeAt(i) & 0xFF);
             w.u16(e.id);
-            w.u16(bytes.length);
-            w.bytes(bytes);
+            w.bytes(e.bc);
         });
 
         return w.toArray();
     }
 
-    /* -------------------------------------------------------
-     * Variable file builder (var.dat)
-     * ----------------------------------------------------- */
 
     function buildVarFile(world) {
         var w    = new ByteWriter();
@@ -813,7 +1301,7 @@ var SmsExporter = (function () {
             { name: 'spr.dat',    data: buildGfxFile(sprEntries,  world, 'SPR_') },
             { name: 'itm.dat',    data: buildGfxFile(itmEntries,  world, 'ITM_') },
             { name: 'room.dat',   data: buildRoomFileV2(world, tileIndexMap, palIdxMap) },
-            { name: 'dlg.dat',    data: buildDlgFile(world) },
+            { name: 'dlg.dat',    data: buildDlgFile(world, tileIndexMap, palIdxMap) },
             { name: 'var.dat',    data: buildVarFile(world) },
             { name: 'itminv.dat', data: buildItmInvFile(world) },
         ];
