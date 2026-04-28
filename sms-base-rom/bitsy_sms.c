@@ -1262,6 +1262,21 @@ void main(void) {
         SMS_copySpritestoSAT();
         init_world();
         draw_room();
+
+        /* DEBUG: show first dialog record header bytes at top of screen */
+        {
+            const unsigned char *dbg = res_get("dlg.dat");
+            if (dbg) {
+                unsigned char col;
+                static const char hex[] = "0123456789ABCDEF";
+                /* Show 12 bytes as hex across the top */
+                for (col = 0; col < 12; col++) {
+                    unsigned char b = dbg[col];
+                    put_char(col*2,   0, hex[b >> 4]);
+                    put_char(col*2+1, 0, hex[b & 0xF]);
+                }
+            }
+        }
         draw_sprites();
         SMS_copySpritestoSAT();
         SMS_displayOn();

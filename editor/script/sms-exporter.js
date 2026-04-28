@@ -946,13 +946,12 @@ var SmsExporter = (function () {
     function compileDialog(src, ctx) {
         var em = new Emitter();
 
-        // Parse the dialog AST using Bitsy's parser
+        // Use the editor's already-initialised scriptInterpreter if available,
+        // otherwise fall back to extractPlainText.
         var scriptObj = null;
         try {
-            if (typeof Script !== 'undefined') {
-                var s = new Script();
-                var interp = s.CreateInterpreter();
-                scriptObj = interp.Parse(src, 'sms_compile');
+            if (typeof scriptInterpreter !== 'undefined' && scriptInterpreter) {
+                scriptObj = scriptInterpreter.Parse(src, 'sms_compile');
             }
         } catch (e) {
             scriptObj = null;
@@ -961,7 +960,7 @@ var SmsExporter = (function () {
         if (scriptObj) {
             compileNode(scriptObj, em, ctx);
         } else {
-            // Fallback: plain text extract (no AST available at compile time)
+            // Fallback: plain text extraction
             var text = extractPlainText(src);
             if (text) em.emitSay(text);
         }
