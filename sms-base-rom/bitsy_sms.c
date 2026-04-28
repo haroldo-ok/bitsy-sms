@@ -810,21 +810,63 @@ static void dlg_start(unsigned int dlg_id) {
 
     n = read_u16(&p);
     for (i = 0; i < n; i++) {
-        unsigned int id   = read_u16(&p);
-        unsigned int blen = read_u16(&p);
+        unsigned int  id   = read_u16(&p);
+        unsigned int  blen = read_u16(&p);
+
         if (id == dlg_id) {
-            unsigned int plen;
-            vm_bc     = p;
-            vm_bc_len = blen;
-            p += blen;
-            plen    = read_u16(&p);
-            vm_pool = p;
-            (void)plen;
+            /* Detect format: bytecode records start with a valid opcode byte
+             * (0x01-0x57 or 0xFF). Plain text records start with printable
+             * ASCII (0x20-0x7E). Opcodes 0x20-0x57 overlap with ASCII, so
+             * we use a stricter check: 0x01-0x1F are non-printable and only
+             * appear in bytecode. 0xFF (HALT) is also bytecode-only.
+             * For the overlap range 0x20-0x57: a valid bytecode sequence will
+             * always start with OP_SAY (0x01), OP_PUSHI (0x10), or similar
+             * low opcodes for text dialogs. We additionally check if blen
+             * is followed by a valid u16 pool_len (bytecode format) vs
+             * being the text directly (old format).
+             * Simplest reliable check: old format has blen == text_length and
+             * no pool_len. New format has bytecode + pool_len.
+             * We distinguish by checking the FIRST byte: if it's >= 0x20 AND
+             * blen matches strlen of the text (no embedded nulls before blen),
+             * it's old format. Otherwise it's new format.
+             * Easiest: just treat anything whose first byte is 0x01 (OP_SAY)
+             * or 0xFF (OP_HALT) as bytecode, otherwise fall back to plain text. */
+            unsigned char first = (blen > 0) ? p[0] : OP_HALT;
+            unsigned char is_bytecode = (first < 0x20) || (first == 0xFF);
+
+            if (is_bytecode) {
+                /* New bytecode format */
+                unsigned int plen;
+                vm_bc     = p;
+                vm_bc_len = blen;
+                p += blen;
+                plen    = read_u16(&p);
+                vm_pool = p;
+                (void)plen;
+            } else {
+                /* Old plain-text format: treat entire record as one SAY */
+                unsigned int cp = blen < 255 ? blen : 255;
+                memcpy(dlg_text, p, cp);
+                dlg_text[cp]  = '\0';
+                dlg_text_len  = (unsigned char)cp;
+                dlg_active    = 1;
+                dlg_done      = 1;
+                dlg_render_text();
+                return;
+            }
             goto dlg_found;
         }
-        /* skip: blen bytes bytecode, 2 bytes plen, plen bytes pool */
-        p += blen;
-        { unsigned int pl = read_u16(&p); p += pl; }
+
+        /* Skip this record: blen bytes bytecode + 2 bytes plen + plen bytes pool */
+        {
+            unsigned char first = (blen > 0) ? p[0] : OP_HALT;
+            unsigned char is_bytecode = (first < 0x20) || (first == 0xFF);
+            p += blen;
+            if (is_bytecode) {
+                unsigned int pl = read_u16(&p);
+                p += pl;
+            }
+        }
     }
     return;
 
@@ -837,15 +879,13 @@ dlg_found:
     dlg_text[0]  = '\0';
 
     if (vm_run()) {
-        /* Script finished in one pass */
         if (dlg_text_len > 0) {
             dlg_render_text();
             dlg_done = 1;
         } else {
-            dlg_active = 0; /* no text at all */
+            dlg_active = 0;
         }
     }
-    /* else: suspended at PG, page already rendered */
 }
 
 static void dlg_advance(void) {
